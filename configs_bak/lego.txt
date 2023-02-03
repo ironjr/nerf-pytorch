@@ -11,7 +11,7 @@ lrate_decay = 500
 
 N_samples = 64
 N_importance = 128
-N_rand = 3072
+N_rand = 1024
 
 precrop_iters = 500
 precrop_frac = 0.5

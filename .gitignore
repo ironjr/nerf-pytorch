@@ -6,4 +6,7 @@
 *.npz
 *.dae
 data/*
+download/*
+noise/*
 logs/*
+*.sw*

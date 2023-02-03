@@ -513,9 +513,11 @@ def config_parser():
                         help='channels per layer in fine network')
     parser.add_argument("--N_rand", type=int, default=32*32*4, 
                         help='batch size (number of random rays per gradient step)')
+    parser.add_argument("--N_iters", type=int, default=1000000, 
+                        help='number of steps in a single run')
     parser.add_argument("--lrate", type=float, default=5e-4, 
                         help='learning rate')
-    parser.add_argument("--lrate_decay", type=int, default=250, 
+    parser.add_argument("--lrate_decay", type=int, default=500, #250, 
                         help='exponential learning rate decay (in 1000 steps)')
     parser.add_argument("--chunk", type=int, default=1024*32, 
                         help='number of rays processed in parallel, decrease if running out of memory')
@@ -598,12 +600,10 @@ def config_parser():
                         help='frequency of testset saving')
     parser.add_argument("--i_video",   type=int, default=50000, 
                         help='frequency of render_poses video saving')
-
     return parser
 
 
 def train():
-
     parser = config_parser()
     args = parser.parse_args()
 
@@ -695,7 +695,7 @@ def train():
 
     # Create log dir and copy the config file
     basedir = args.basedir
-    expname = args.expname
+    expname = args.expname + '_blue'
     os.makedirs(os.path.join(basedir, expname), exist_ok=True)
     f = os.path.join(basedir, expname, 'args.txt')
     with open(f, 'w') as file:
@@ -709,7 +709,6 @@ def train():
 
     # Create nerf model
     render_kwargs_train, render_kwargs_test, start, grad_vars, optimizer = create_nerf(args)
-    global_step = start
 
     bds_dict = {
         'near' : near,
@@ -769,8 +768,8 @@ def train():
         rays_rgb = torch.Tensor(rays_rgb).to(device)
 
 
-    N_iters = 200000 + 1
-    print('Begin')
+    N_iters = args.N_iters + 1
+    print(f'Begin! Run for {args.N_iters} iterations.')
     print('TRAIN views are', i_train)
     print('TEST views are', i_test)
     print('VAL views are', i_val)
@@ -890,7 +889,7 @@ def train():
         ###   update learning rate   ###
         decay_rate = 0.1
         decay_steps = args.lrate_decay * 1000
-        new_lrate = args.lrate * (decay_rate ** (global_step / decay_steps))
+        new_lrate = args.lrate * (decay_rate ** ((i - 1) / decay_steps))
         for param_group in optimizer.param_groups:
             param_group['lr'] = new_lrate
         ################################
@@ -903,7 +902,7 @@ def train():
         if i%args.i_weights==0:
             path = os.path.join(basedir, expname, '{:06d}.tar'.format(i))
             torch.save({
-                'global_step': global_step,
+                'global_step': i - 1,
                 'network_fn_state_dict': render_kwargs_train['network_fn'].state_dict(),
                 'network_fine_state_dict': render_kwargs_train['network_fine'].state_dict(),
                 'optimizer_state_dict': optimizer.state_dict(),
@@ -939,7 +938,7 @@ def train():
         if i%args.i_print==0:
             tqdm.write(f"[TRAIN] Iter: {i} Loss: {loss.item()}  PSNR: {psnr.item()}")
         """
-            print(expname, i, psnr.numpy(), loss.numpy(), global_step.numpy())
+            print(expname, i, psnr.numpy(), loss.numpy(), i - 1)
             print('iter time {:.05f}'.format(dt))
 
             with tf.contrib.summary.record_summaries_every_n_global_steps(args.i_print):
@@ -979,8 +978,6 @@ def train():
                         tf.contrib.summary.image('disp0', extras['disp0'][tf.newaxis,...,tf.newaxis])
                         tf.contrib.summary.image('z_std', extras['z_std'][tf.newaxis,...,tf.newaxis])
         """
-
-        global_step += 1
 
 
 if __name__=='__main__':
