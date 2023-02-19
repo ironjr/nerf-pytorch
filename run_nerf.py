@@ -11,6 +11,8 @@ from tqdm import tqdm, trange
 
 import matplotlib.pyplot as plt
 
+import wandb
+
 from run_nerf_helpers import *
 
 from load_llff import load_llff_data
@@ -272,7 +274,8 @@ def raw2outputs(raw, z_vals, rays_d, raw_noise_std=0, white_bkgd=False, pytest=F
         weights: [num_rays, num_samples]. Weights assigned to each sampled color.
         depth_map: [num_rays]. Estimated distance to object.
     """
-    raw2alpha = lambda raw, dists, act_fn=F.relu: 1.-torch.exp(-act_fn(raw)*dists)
+    #  raw2alpha = lambda raw, dists, act_fn=F.relu: 1.-torch.exp(-act_fn(raw)*dists)
+    raw2alpha = lambda raw, dists, act_fn=F.softplus: 1.-torch.exp(-act_fn(raw)*dists)
 
     dists = z_vals[...,1:] - z_vals[...,:-1]
     dists = torch.cat([dists, torch.Tensor([1e10]).expand(dists[...,:1].shape)], -1)  # [N_rays, N_samples]
@@ -440,9 +443,9 @@ def config_parser():
                         help='layers in fine network')
     parser.add_argument("--netwidth_fine", type=int, default=256, 
                         help='channels per layer in fine network')
-    parser.add_argument("--N_rand", type=int, default=4096, #32*32*4, 
+    parser.add_argument("--N_rand", type=int, default=1024, # 4096, #32*32*4, 
                         help='batch size (number of random rays per gradient step)')
-    parser.add_argument("--N_iters", type=int, default=1000000, 
+    parser.add_argument("--N_iters", type=int, default=300000, 
                         help='number of steps in a single run')
     parser.add_argument("--lrate", type=float, default=5e-4, 
                         help='learning rate')
@@ -537,6 +540,13 @@ def train():
 
     parser = config_parser()
     args = parser.parse_args()
+
+    wandb.init(
+        project="nerfblue",
+        notes=args.expname,
+        tags=["baseline", "NeRF"],
+        config=vars(args),
+    )
 
     # Load data
     K = None
@@ -710,7 +720,7 @@ def train():
     # writer = SummaryWriter(os.path.join(basedir, 'summaries', expname))
     
     start = start + 1
-    for i in trange(start, N_iters):
+    for i in (pbar := trange(start, N_iters)):
         time0 = time.time()
 
         # Sample random ray batch
@@ -759,13 +769,12 @@ def train():
                 target_s = target[select_coords[:, 0], select_coords[:, 1]]  # (N_rand, 3)
 
         #####  Core optimization loop  #####
-        rgb, disp, acc, extras = render(H, W, K, chunk=args.chunk, rays=batch_rays,
-                                                verbose=i < 10, retraw=True,
-                                                **render_kwargs_train)
+        rgb, disp, acc, extras = render(
+            H, W, K, chunk=args.chunk, rays=batch_rays, verbose=i < 10, retraw=True, **render_kwargs_train)
 
         optimizer.zero_grad()
         img_loss = img2mse(rgb, target_s)
-        trans = extras['raw'][...,-1]
+        trans = extras['raw'][..., -1]
         loss = img_loss
         psnr = mse2psnr(img_loss)
 
@@ -791,7 +800,7 @@ def train():
         #####           end            #####
 
         # Rest is logging
-        if i%args.i_weights==0:
+        if i % args.i_weights == 0:
             path = os.path.join(basedir, expname, '{:06d}.tar'.format(i))
             torch.save({
                 'global_step': global_step,
@@ -801,7 +810,7 @@ def train():
             }, path)
             print('Saved checkpoints at', path)
 
-        if i%args.i_video==0 and i > 0:
+        if i % args.i_video == 0 and i > 0:
             # Turn on testing mode
             with torch.no_grad():
                 rgbs, disps = render_path(render_poses, hwf, K, args.chunk, render_kwargs_test)
@@ -817,59 +826,59 @@ def train():
             #     render_kwargs_test['c2w_staticcam'] = None
             #     imageio.mimwrite(moviebase + 'rgb_still.mp4', to8b(rgbs_still), fps=30, quality=8)
 
-        if i%args.i_testset==0 and i > 0:
+        if i % args.i_testset == 0 and i > 0:
             testsavedir = os.path.join(basedir, expname, 'testset_{:06d}'.format(i))
             os.makedirs(testsavedir, exist_ok=True)
             print('test poses shape', poses[i_test].shape)
             with torch.no_grad():
                 render_path(torch.Tensor(poses[i_test]).to(device), hwf, K, args.chunk, render_kwargs_test, gt_imgs=images[i_test], savedir=testsavedir)
             print('Saved test set')
-
-
     
-        if i%args.i_print==0:
+        if i % args.i_print == 0:
             tqdm.write(f"[TRAIN] Iter: {i} Loss: {loss.item()}  PSNR: {psnr.item()}")
-        """
-            print(expname, i, psnr.numpy(), loss.numpy(), global_step.numpy())
-            print('iter time {:.05f}'.format(dt))
+            wandb.log({
+                'step': i,
+                'epoch': i // len(i_train) + 1,
+                'dt': dt,
+                'loss': loss.item(),
+                'psnr': psnr.item(),
+                'tran': wandb.Histogram(trans.detach().cpu().numpy()),
+                # 'psnr0': psnr0.item()
+            })
 
-            with tf.contrib.summary.record_summaries_every_n_global_steps(args.i_print):
-                tf.contrib.summary.scalar('loss', loss)
-                tf.contrib.summary.scalar('psnr', psnr)
-                tf.contrib.summary.histogram('tran', trans)
-                if args.N_importance > 0:
-                    tf.contrib.summary.scalar('psnr0', psnr0)
+            #  with tf.contrib.summary.record_summaries_every_n_global_steps(args.i_print):
+            #      tf.contrib.summary.scalar('loss', loss)
+            #      tf.contrib.summary.scalar('psnr', psnr)
+            #      tf.contrib.summary.histogram('tran', trans)
+            #      if args.N_importance > 0:
+            #          tf.contrib.summary.scalar('psnr0', psnr0)
 
+            #  if i%args.i_img==0:
+            #      # Log a rendered validation view to Tensorboard
+            #      img_i=np.random.choice(i_val)
+            #      target = images[img_i]
+            #      pose = poses[img_i, :3,:4]
+            #      with torch.no_grad():
+            #          rgb, disp, acc, extras = render(
+            #              H, W, focal, chunk=args.chunk, c2w=pose, **render_kwargs_test)
+            #
+            #      psnr = mse2psnr(img2mse(rgb, target))
+            #
+            #      with tf.contrib.summary.record_summaries_every_n_global_steps(args.i_img):
+            #          tf.contrib.summary.image('rgb', to8b(rgb)[tf.newaxis])
+            #          tf.contrib.summary.image('disp', disp[tf.newaxis,...,tf.newaxis])
+            #          tf.contrib.summary.image('acc', acc[tf.newaxis,...,tf.newaxis])
+            #          tf.contrib.summary.scalar('psnr_holdout', psnr)
+            #          tf.contrib.summary.image('rgb_holdout', target[tf.newaxis])
+            #
+            #
+            #      if args.N_importance > 0:
+            #          with tf.contrib.summary.record_summaries_every_n_global_steps(args.i_img):
+            #              tf.contrib.summary.image('rgb0', to8b(extras['rgb0'])[tf.newaxis])
+            #              tf.contrib.summary.image('disp0', extras['disp0'][tf.newaxis,...,tf.newaxis])
+            #              tf.contrib.summary.image('z_std', extras['z_std'][tf.newaxis,...,tf.newaxis])
 
-            if i%args.i_img==0:
-
-                # Log a rendered validation view to Tensorboard
-                img_i=np.random.choice(i_val)
-                target = images[img_i]
-                pose = poses[img_i, :3,:4]
-                with torch.no_grad():
-                    rgb, disp, acc, extras = render(H, W, focal, chunk=args.chunk, c2w=pose,
-                                                        **render_kwargs_test)
-
-                psnr = mse2psnr(img2mse(rgb, target))
-
-                with tf.contrib.summary.record_summaries_every_n_global_steps(args.i_img):
-
-                    tf.contrib.summary.image('rgb', to8b(rgb)[tf.newaxis])
-                    tf.contrib.summary.image('disp', disp[tf.newaxis,...,tf.newaxis])
-                    tf.contrib.summary.image('acc', acc[tf.newaxis,...,tf.newaxis])
-
-                    tf.contrib.summary.scalar('psnr_holdout', psnr)
-                    tf.contrib.summary.image('rgb_holdout', target[tf.newaxis])
-
-
-                if args.N_importance > 0:
-
-                    with tf.contrib.summary.record_summaries_every_n_global_steps(args.i_img):
-                        tf.contrib.summary.image('rgb0', to8b(extras['rgb0'])[tf.newaxis])
-                        tf.contrib.summary.image('disp0', extras['disp0'][tf.newaxis,...,tf.newaxis])
-                        tf.contrib.summary.image('z_std', extras['z_std'][tf.newaxis,...,tf.newaxis])
-        """
+        pbar.set_description(f"Loss: {loss.item():.6f}")
 
         global_step += 1
 

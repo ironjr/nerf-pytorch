@@ -71,6 +71,7 @@ class BlueNoiseLoader(nn.Module):
         self,
         x: torch.Tensor = None,
         shape: Tuple[int] = (1, 1, -1, -1),
+        idx: Optional[Tuple[int]] = None,
     ) -> torch.Tensor:
         """Sample a blue Gaussian noise from the database.
 
@@ -107,8 +108,9 @@ class BlueNoiseLoader(nn.Module):
                     n_sample *= rep
 
         # Sample blue noise.
-        i_kwargs = {'device': self.data.device, 'dtype': torch.long}
-        idx = torch.randint(0, self.set_length, (n_sample,), **i_kwargs)
+        if idx is None:
+            i_kwargs = {'device': self.data.device, 'dtype': torch.long}
+            idx = torch.randint(0, self.set_length, (n_sample,), **i_kwargs)
         blue = self.data[idx, ...].unsqueeze(1)
         blue = postprocess(blue)
 
